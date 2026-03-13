@@ -11,6 +11,8 @@ import sys
 from typing import Optional, Type
 
 import numpy as np
+from PIL import Image
+import datetime
 
 # 模拟“放在 tasks 文件夹中”的环境：保证项目根在 sys.path，使
 # from vima_bench.tasks... 能正确解析，不注入任何 shim 模块。
@@ -128,6 +130,57 @@ def verify_task_code(code: str, verbose: bool = True) -> tuple[bool, Optional[in
         return False, 2, err_msg
 
     # ---------- Step 3: Oracle 完成度 ----------
+    def _save_debug_data(obs_obj, hmap_obj, obj_mask_obj, env_obj, task_obj, tag: str):
+        """Save debug artifacts to disk: rgb per view (PNG), hmap.npy, obj_mask.npy, and a small metadata txt.
+
+        Files are saved under <project_root>/verifier_debug/<task_name>_<timestamp>_<tag>/
+        """
+        try:
+            task_name_safe = getattr(task_obj, "task_name", task_obj.__class__.__name__)
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            base = os.path.join(_ROOT_DIR, "verifier_debug", f"{task_name_safe}_{ts}_{tag}")
+            os.makedirs(base, exist_ok=True)
+
+            # Save hmap and obj_mask as numpy
+            if hmap_obj is not None:
+                np.save(os.path.join(base, "hmap.npy"), hmap_obj)
+            if obj_mask_obj is not None:
+                np.save(os.path.join(base, "obj_mask.npy"), obj_mask_obj)
+
+            # Save rgb frames if present in obs
+            try:
+                if obs_obj is not None and "rgb" in obs_obj:
+                    rgb_dict = obs_obj["rgb"]
+                    # choose first view/frame available and save
+                    for view, arr in rgb_dict.items():
+                        a = np.asarray(arr)
+                        # handle (C,H,W) -> (H,W,C)
+                        if a.ndim == 3 and a.shape[0] == 3:
+                            a = np.transpose(a, (1, 2, 0))
+                        # If there is a time dimension (T, C, H, W) or (T, H, W, C), take first
+                        if a.ndim == 4:
+                            a = a[0]
+                        if a.dtype != np.uint8:
+                            a = np.clip(a, 0, 255).astype(np.uint8)
+                        Image.fromarray(a).save(os.path.join(base, f"rgb_{view}.png"))
+            except Exception:
+                # non-fatal
+                pass
+
+            # Save a small metadata text
+            try:
+                meta_path = os.path.join(base, "meta.txt")
+                with open(meta_path, "w") as mf:
+                    mf.write(f"task: {task_name_safe}\n")
+                    mf.write(f"goals: {getattr(task_obj, 'goals', None)}\n")
+                    mf.write(f"obj_id_reverse_mapping keys: {list(getattr(env_obj, 'obj_id_reverse_mapping', {}).keys())}\n")
+            except Exception:
+                pass
+            if verbose:
+                print(f"[VERIFY][DEBUG] Saved debug artifacts to: {base}")
+        except Exception as _e:
+            if verbose:
+                print("[VERIFY][DEBUG] Failed to save debug data:", _e)
     try:
         task = env.task
         oracle_fn = task.oracle(env)
@@ -136,28 +189,52 @@ def verify_task_code(code: str, verbose: bool = True) -> tuple[bool, Optional[in
                 f"task.oracle(env) 返回了 None！"
                 f"检查：goals={task.goals}, _all_goals={getattr(task, '_all_goals', 'NOT SET')}"
             )
+
         success = False
         info = {}
 
-        for step in range(getattr(task, "oracle_max_steps", 10)):
-            # DEBUG: inspect environment / masks before calling oracle
+        # task.oracle_max_steps 步内循环调用 oracle_fn.act(obs)，遇到 None 视为 oracle 失败
+        #（返回失败），否则 clip 动作并执行 env.step，直到 done 或用尽步数。
+        obs_curr = obs
+        for _ in range(getattr(task, "oracle_max_steps", 10)):
+            # 可选调试：在调用 oracle 前查看真值图像/掩码，帮助定位不可见问题
             try:
                 _, hmap, obj_mask = task.get_true_image(env)
-                print("[DEBUG] goals:", task.goals)
-                print("[DEBUG] obj_id_reverse_mapping keys:", list(env.obj_id_reverse_mapping.keys()))
-                print("[DEBUG] obj_mask unique ids:", np.unique(obj_mask)[:20])
-                print("[DEBUG] obj_mask nonzero count:", np.count_nonzero(obj_mask))
+                if verbose:
+                    print("[DEBUG] goals:", task.goals)
+                    print("[DEBUG] obj_id_reverse_mapping keys:", list(env.obj_id_reverse_mapping.keys()))
+                    print("[DEBUG] obj_mask unique ids:", np.unique(obj_mask)[:20])
+                    print("[DEBUG] obj_mask nonzero count:", np.count_nonzero(obj_mask))
             except Exception as _e:
-                print("[DEBUG] get_true_image() failed:", _e)
-            
-            action = oracle_fn.act(obs)
-            if action is None:
-                raise RuntimeError("oracle 返回 None，无法继续。")
-            action = {
+                if verbose:
+                    print("[DEBUG] get_true_image() failed:", _e)
+
+            oracle_action = oracle_fn.act(obs_curr)
+            if oracle_action is None:
+                err_msg = "oracle 返回 None，无法继续。"
+                if verbose:
+                    print("[VERIFY][Step 3] Oracle 失败：", err_msg)
+                # save debug artifacts: ensure we have latest hmap/obj_mask/obs
+                try:
+                    _hmap = locals().get("hmap", None)
+                    _obj_mask = locals().get("obj_mask", None)
+                    if _hmap is None or _obj_mask is None:
+                        try:
+                            _, _hmap, _obj_mask = task.get_true_image(env)
+                        except Exception:
+                            _hmap, _obj_mask = None, None
+                except Exception:
+                    _hmap, _obj_mask = None, None
+                _save_debug_data(obs_curr, _hmap, _obj_mask, env, task, tag="oracle_none")
+                env.close()
+                return False, 3, err_msg
+
+            # clip 并执行一步环境
+            oracle_action = {
                 k: np.clip(v, env.action_space[k].low, env.action_space[k].high)
-                for k, v in action.items()
+                for k, v in oracle_action.items()
             }
-            obs, reward, done, info = env.step(action=action, skip_oracle=False)
+            obs_curr, _, done, info = env.step(action=oracle_action, skip_oracle=False)
             if done:
                 success = bool(info.get("success"))
                 break
@@ -166,6 +243,15 @@ def verify_task_code(code: str, verbose: bool = True) -> tuple[bool, Optional[in
             err_msg = f"在 {getattr(task, 'oracle_max_steps', 10)} 步内未成功完成任务。 info={info}"
             if verbose:
                 print("[VERIFY][Step 3] Oracle 检查失败：" + err_msg)
+            # save debug artifacts on overall failure as well
+            try:
+                try:
+                    _, _hmap, _obj_mask = task.get_true_image(env)
+                except Exception:
+                    _hmap, _obj_mask = None, None
+                _save_debug_data(obs_curr, _hmap, _obj_mask, env, task, tag="oracle_not_success")
+            except Exception:
+                pass
             env.close()
             return False, 3, err_msg
 

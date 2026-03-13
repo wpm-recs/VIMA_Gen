@@ -5,6 +5,9 @@ import os
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 from typing import Optional
 
+import json
+import datetime
+
 from api_reference import get_api_reference_text
 from failed_store import append_failed, get_past_failures_for_prompt
 from rag_generator import (
@@ -70,15 +73,30 @@ def main() -> None:
         default=0.7,
         help="生成随机性（LLM temperature）。",
     )
+
     args = parser.parse_args()
+
 
     print("[RAG] 构建任务检索器（内置 + 已生成任务）...")
     retriever = build_retriever(k=args.k)
     api_reference = get_api_reference_text()
     past_failures_text = get_past_failures_for_prompt()
 
+    results = []
     for i in range(args.n):
         print(f"\n========== 候选任务 #{i + 1} ==========")
+
+        attempt_record = {
+            "index": i,
+            "task_name": None,
+            # verify sub-steps (Step1: syntax/struct, Step2: reset, Step3: oracle)
+            "verify_step1": False,
+            "verify_step2": False,
+            "verify_step3": False,
+            "verify_ok": False,
+            "failed_step": None,
+            "error_msg": None,
+        }
 
         # Step 1: Propose task name and description
         print("[RAG] Step 1: 提出任务名与描述...")
@@ -89,13 +107,19 @@ def main() -> None:
                 temperature=args.temperature,
                 hint_brief=args.brief,
             )
+            # proposal succeeded; but we do not record generation rates here per request
         except Exception as e:
             print(f"[RAG] Step 1 失败：{e}")
+            attempt_record["error_msg"] = str(e)
+            # record and continue to next candidate
+            attempt_record["task_name"] = None
+            results.append(attempt_record)
             continue
 
         task_name = proposal["task_name"]
         group = proposal["group"]
         task_description = proposal["task_description"]
+        attempt_record["task_name"] = task_name
         print(f"[RAG] 提议: task_name={task_name}, group={group}")
         print(f"[RAG] 描述: {task_description}")
 
@@ -112,13 +136,16 @@ def main() -> None:
                 model_name=args.model,
                 temperature=args.temperature,
             )
+            # code generation succeeded; not tracked in final verification summary
         except Exception as e:
             print(f"[RAG] Step 2 失败：{e}")
+            attempt_record["error_msg"] = str(e)
+            results.append(attempt_record)
             continue
 
         print(f"[RAG] 生成任务的 task_name: {extract_task_name_literal(code) or task_name}")
-        preview_lines = code.splitlines()[:40]
-        print("\n----- 代码预览（前 40 行）-----")
+        preview_lines = code.splitlines()[:]
+        print("\n----- 代码预览-----")
         print("\n".join(preview_lines))
         print("----- 预览结束 -----\n")
 
@@ -126,6 +153,32 @@ def main() -> None:
         if not ok and failed_step is not None and error_msg is not None:
             append_failed(code, failed_step, error_msg, task_name=task_name)
             print("[RAG] 已将该次失败记录到 failed_generations.json。")
+        attempt_record["verify_ok"] = bool(ok)
+        attempt_record["failed_step"] = failed_step
+        attempt_record["error_msg"] = error_msg
+        # derive per-verify-step pass/fail from failed_step
+        if ok and failed_step is None:
+            attempt_record["verify_step1"] = True
+            attempt_record["verify_step2"] = True
+            attempt_record["verify_step3"] = True
+        else:
+            if failed_step == 1:
+                attempt_record["verify_step1"] = False
+                attempt_record["verify_step2"] = False
+                attempt_record["verify_step3"] = False
+            elif failed_step == 2:
+                attempt_record["verify_step1"] = True
+                attempt_record["verify_step2"] = False
+                attempt_record["verify_step3"] = False
+            elif failed_step == 3:
+                attempt_record["verify_step1"] = True
+                attempt_record["verify_step2"] = True
+                attempt_record["verify_step3"] = False
+            else:
+                # unknown failure mode -> mark all as False
+                attempt_record["verify_step1"] = False
+                attempt_record["verify_step2"] = False
+                attempt_record["verify_step3"] = False
         print(f"[RAG] 验证结果：{'通过' if ok else '失败'}")
 
         if args.save and ok:
@@ -136,7 +189,45 @@ def main() -> None:
             print("[RAG] 验证未通过，未保存代码。")
         else:
             print("[RAG] 未保存（如需保存请加 --save）")
+        # append attempt record to results
+        results.append(attempt_record)
 
+
+    # Summarize results and save to JSON
+    try:
+        all_task_names = [r.get("task_name") for r in results]
+        total = len(results)
+        # verification sub-step pass counts
+        step1_pass = sum(1 for r in results if r.get("verify_step1"))
+        step2_pass = sum(1 for r in results if r.get("verify_step2"))
+        step3_pass = sum(1 for r in results if r.get("verify_step3"))
+        # pass rates relative to total attempts (not conditional)
+        step1_rate = step1_pass / total if total else 0.0
+        step2_rate = step2_pass / total if total else 0.0
+        step3_rate = step3_pass / total if total else 0.0
+        summary = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "total_attempts": total,
+            "verify_step1_pass_count": step1_pass,
+            "verify_step2_pass_count": step2_pass,
+            "verify_step3_pass_count": step3_pass,
+            "verify_step1_pass_rate": step1_rate,
+            "verify_step2_pass_rate": step2_rate,
+            "verify_step3_pass_rate": step3_rate,
+            "all_task_names": all_task_names,
+            "passed_task_names": [r.get("task_name") for r in results if r.get("verify_ok")],
+            "attempts": results,
+        }
+        out_dir = os.path.join(os.path.dirname(__file__), "run_results")
+        os.makedirs(out_dir, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = os.path.join(out_dir, f"run_{ts}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        print(f"[RAG] 运行摘要已保存到: {out_path}")
+        print("[RAG] 通过的任务:", summary["passed_task_names"])
+    except Exception as e:
+        print("[RAG] 无法保存运行摘要：", e)
 
 if __name__ == "__main__":
     main()

@@ -150,6 +150,26 @@ You are also given example task implementations from VIMA-Bench, and the followi
 
 {skeleton}
 
+IMPORTANT IMPLEMENTATION NOTE (MUST FOLLOW):
+When you implement `reset(self, env)` you MUST place objects at randomized poses (sampled from the workspace) rather than directly at the goal pose. If a sampled pose already satisfies the goal metric (i.e. `self.is_match(curr_pose, target_pose, symmetry)` would return True), you MUST re-sample or perturb the pose so the initial state is not successful.
+
+Example (inside `reset`):
+
+    # sample object and pose as usual
+    obj_id, urdf_path, pose = self.add_object_to_env(...)
+    env.obj_ids["rigid"].append(obj_id)
+    # check and perturb if initial pose already meets the goal
+    curr_pose = p.getBasePositionAndOrientation(obj_id, physicsClientId=self.client_id)
+    if self.is_match(curr_pose, target_pose, symmetry):
+        dx = self.rng.uniform(-0.02, 0.02)
+        dy = self.rng.uniform(-0.02, 0.02)
+        new_pos = (curr_pose[0][0] + dx, curr_pose[0][1] + dy, max(curr_pose[0][2] + 0.005, 0.01))
+        p.resetBasePositionAndOrientation(obj_id, new_pos, curr_pose[1], physicsClientId=self.client_id)
+
+This mirrors how existing tasks in the repository ensure episodes require a non-trivial demonstration and avoids producing trivial "already solved" initial states.
+
+Provide a sufficient number of maximum steps for the oracle, at least 10.
+
 Goal:
 - Implement a NEW task class that matches the given task name and description.
 - Subclass BaseTask (or a specialized base like RotateTheObjBase, SweepObjectsToZoneBase if appropriate).
