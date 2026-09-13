@@ -2,6 +2,9 @@ defaults:
   - _self_  # all below configs will override this conf.yaml
   - task: visual_manipulation
 
+# 运行设备：auto（默认，检测到 CUDA 即用 GPU）/ cpu / cuda / cuda:0
+device: auto
+
 vima_bench_kwargs:
   task_name: ???
   task_kwargs: ???

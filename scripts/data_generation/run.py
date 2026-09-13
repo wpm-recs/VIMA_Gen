@@ -27,7 +27,12 @@ def _generate_data_for_one_task(
     save_path: str,
     num_save_digits: int,
     seed: int | None = None,
+    device=None,
 ):
+    # Resolve/apply the device inside each worker process: CUDA contexts are
+    # per-process, so this must not be done only in the parent.
+    vima_bench.configure_device(device, verbose=False)
+
     save_path = U.f_join(save_path, task_name)
     os.makedirs(save_path, exist_ok=True)
 
@@ -153,6 +158,8 @@ def generate_data_for_one_task(kwargs):
 
 @hydra.main(config_path=".", config_name="conf", version_base="1.1")
 def main(cfg):
+    device = vima_bench.configure_device(cfg.get("device", None))
+
     tasks = sorted(list(PARTITION_TO_SPECS["train"].keys()))
     task_selection = cfg.task_selection
     if task_selection is not None:
@@ -182,6 +189,7 @@ def main(cfg):
                             save_path=cfg.save_path,
                             num_save_digits=cfg.num_save_digits,
                             seed=cfg.seed,
+                            device=device,
                         )
                         for t in tasks_this_batch
                     ],
@@ -197,6 +205,7 @@ def main(cfg):
                 save_path=cfg.save_path,
                 num_save_digits=cfg.num_save_digits,
                 seed=cfg.seed,
+                device=device,
             )
 
 

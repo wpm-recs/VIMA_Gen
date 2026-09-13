@@ -1,7 +1,9 @@
+# ---- VIMA-Bench core ----
 pybullet
 gym==0.21.0
 einops
 dm-tree
+numpy
 torch
 torchvision
 psutil
@@ -10,10 +12,21 @@ matplotlib
 imageio
 transforms3d
 kornia
-einops
 hydra-core
+omegaconf
 tqdm
-black
 av
 importlib_resources
+black
+
+# ---- VIMA_Gen: RAG + LLM task generation ----
 langchain-openai
+langchain-community
+langchain-core
+faiss-cpu
+python-dotenv
+# 本地嵌入模型（RAG 检索，无需第二个 API key；可换成 openai 后端）
+sentence-transformers
+
+# ---- image utilities (PIL used by verifier / data scripts) ----
+Pillow

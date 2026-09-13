@@ -102,7 +102,18 @@ def main():
     parser.add_argument("--oracle", action="store_true", help="用 oracle 跑几轮并检查 success（会弹窗）")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--episodes", type=int, default=2, help="--oracle 时跑的 episode 数")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="运行设备：auto（默认，检测到 CUDA 就用 GPU）/ cpu / cuda / cuda:0。",
+    )
     args = parser.parse_args()
+
+    # 启用 GPU：auto 且有 CUDA 时选择 cuda:0
+    import vima_bench
+
+    vima_bench.configure_device(args.device, verbose=True)
 
     try:
         if args.oracle:

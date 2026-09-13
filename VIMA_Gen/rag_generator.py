@@ -8,9 +8,37 @@ from typing import Any, Dict, List
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain.schema import Document
+from langchain_core.documents import Document
 
+from settings import EmbeddingConfig, LLMConfig
 from task_index import load_all_task_docs, get_existing_task_names_and_docs, TaskDoc
+
+
+# ---------- LLM client factories (config driven) ----------
+
+
+def _chat_model(
+    llm: LLMConfig | None = None,
+    model_name: str | None = None,
+    temperature: float | None = None,
+) -> ChatOpenAI:
+    """按配置构造 ChatOpenAI（模型 / 温度 / base_url / api_key 均来自 .env 与 config.yaml）。"""
+    cfg = llm or LLMConfig()
+    return ChatOpenAI(**cfg.chat_kwargs(model=model_name, temperature=temperature))
+
+
+def _embedding_model(embedding: EmbeddingConfig | None = None):
+    """按配置构造嵌入模型。
+
+    provider=local  → sentence-transformers 本地模型（离线，GPU 自动加速）
+    provider=openai → OpenAI 兼容的 /embeddings 接口
+    """
+    cfg = embedding or EmbeddingConfig()
+    if cfg.is_local:
+        from embeddings import LocalSentenceTransformerEmbeddings
+
+        return LocalSentenceTransformerEmbeddings(cfg.local_model)
+    return OpenAIEmbeddings(**cfg.openai_kwargs())
 
 
 # ---------- Step 1: Propose task name and description ----------
@@ -31,8 +59,9 @@ TASK_DESCRIPTION: <one or two sentences>
 
 def propose_new_task(
     retriever,
-    model_name: str = "gpt-4.1-mini",
-    temperature: float = 0.7,
+    llm: LLMConfig | None = None,
+    model_name: str | None = None,
+    temperature: float | None = None,
     hint_brief: str | None = None,
 ) -> Dict[str, str]:
     """
@@ -51,8 +80,8 @@ def propose_new_task(
         user_content += f"\nUser hint for the new task: {hint_brief}\n"
     user_content += "\nPropose one new task (TASK_NAME, GROUP, TASK_DESCRIPTION):"
 
-    llm = ChatOpenAI(model=model_name, temperature=temperature)
-    resp = llm.invoke(
+    client = _chat_model(llm, model_name=model_name, temperature=temperature)
+    resp = client.invoke(
         [{"role": "system", "content": PROMPT_STEP1_SYSTEM}, {"role": "user", "content": user_content}]
     )
     content = resp.content if isinstance(resp.content, str) else str(resp.content)
@@ -206,11 +235,14 @@ def _build_documents(task_docs: List[TaskDoc]) -> List[Document]:
     return docs
 
 
-def build_retriever(k: int = 5):
+def build_retriever(k: int = 5, llm: LLMConfig | None = None,
+                    embedding: EmbeddingConfig | None = None):
     """Build a FAISS retriever over builtin + generated tasks. k is the number of docs to retrieve."""
+    llm = llm or LLMConfig()
+    llm.require_api_key()
     task_docs = load_all_task_docs()
     docs = _build_documents(task_docs)
-    embeddings = OpenAIEmbeddings()
+    embeddings = _embedding_model(embedding)
     vs = FAISS.from_documents(docs, embedding=embeddings)
     return vs.as_retriever(search_kwargs={"k": k})
 
@@ -222,8 +254,9 @@ def generate_new_task_code(
     retriever,
     api_reference: str,
     past_failures_text: str = "",
-    model_name: str = "gpt-4.1-mini",
-    temperature: float = 0.7,
+    llm: LLMConfig | None = None,
+    model_name: str | None = None,
+    temperature: float | None = None,
 ) -> str:
     """
     Step 2: Generate Python code for the task given (task_name, task_description, group).
@@ -232,7 +265,8 @@ def generate_new_task_code(
     """
     brief = f"task_name: {task_name}\ngroup: {group}\ntask_description: {task_description}"
 
-    related_docs = retriever.get_relevant_documents(brief)
+    # langchain-core 1.x 移除了 get_relevant_documents，统一用 invoke
+    related_docs = retriever.invoke(brief)
     context_snippets = []
     for d in related_docs:
         tn = d.metadata.get("task_name")
@@ -260,8 +294,8 @@ Example tasks for reference:
 Generate the Python class for this task. Use ONLY the imports and tools from the API reference. Output only a ```python ... ``` block.
 """.strip()
 
-    llm = ChatOpenAI(model=model_name, temperature=temperature)
-    resp = llm.invoke(
+    client = _chat_model(llm, model_name=model_name, temperature=temperature)
+    resp = client.invoke(
         [
             {"role": "system", "content": _system_prompt_step2(api_reference)},
             {"role": "user", "content": user_prompt},

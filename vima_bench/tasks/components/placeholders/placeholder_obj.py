@@ -11,7 +11,11 @@ from .base import Placeholder
 from ..cameras import get_agent_cam_config
 from ..encyclopedia import TexturePedia, TextureEntry
 from ...utils import misc_utils as utils
+from ...utils.device import pybullet_renderer
 from ...utils.pybullet_utils import p_change_texture
+
+# GPU/EGL accelerated by default; VIMA_RENDERER=tiny forces the CPU rasteriser.
+_RENDERER = pybullet_renderer()
 
 
 class PlaceholderObj(Placeholder):
@@ -119,7 +123,7 @@ class PlaceholderObj(Placeholder):
             viewMatrix=viewm,
             projectionMatrix=projm,
             flags=p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX,
-            renderer=p.ER_BULLET_HARDWARE_OPENGL,
+            renderer=_RENDERER,
             physicsClientId=client_id,
         )
 

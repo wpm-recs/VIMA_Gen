@@ -136,9 +136,14 @@ celerybeat.pid
 
 # Environments
 .env
+# Local secret config (API keys / endpoints). Template: .env_example (committed).
+.env.*
+!.env_example
 .envrc
 .venv
-env/
+# NOTE: only ignore a *root-level* "env/" virtualenv dir. A bare "env/" rule
+# also matches "vima_bench/env/", which silently dropped that package from git.
+/env/
 venv/
 ENV/
 env.bak/

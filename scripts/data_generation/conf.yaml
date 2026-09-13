@@ -1,5 +1,7 @@
 task_selection: null
 modalities: ["rgb", "segm"]
+# 运行设备：auto（默认，检测到 CUDA 即用 GPU）/ cpu / cuda / cuda:0
+device: auto
 num_episodes_per_task: 50000
 success_only: true
 save_path: ???

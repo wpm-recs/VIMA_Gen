@@ -7,6 +7,9 @@ import vima_bench
 
 @hydra.main(config_path=".", config_name="conf")
 def main(cfg):
+    # 启用 GPU：auto 且有 CUDA 时选择 cuda:0
+    vima_bench.configure_device(cfg.get("device", None), verbose=True)
+
     kwargs = cfg.vima_bench_kwargs
     seed = kwargs["seed"]
 

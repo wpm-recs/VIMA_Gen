@@ -16,6 +16,7 @@ from rag_generator import (
     generate_new_task_code,
 )
 from verifier import verify_task_code, extract_task_name_literal
+from settings import load_config, resolve_path
 
 
 def save_task_code(
@@ -39,6 +40,12 @@ def main() -> None:
         description="两步生成 VIMA 新任务：① 提出任务名与描述 ② 生成代码并验证。"
     )
     parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="运行配置文件路径（默认 VIMA_Gen/config.yaml）。",
+    )
+    parser.add_argument(
         "--brief",
         type=str,
         default=None,
@@ -47,43 +54,85 @@ def main() -> None:
     parser.add_argument(
         "--n",
         type=int,
-        default=1,
-        help="生成候选任务数量（默认 1）。",
+        default=None,
+        help="生成候选任务数量（覆盖 config.yaml）。",
     )
     parser.add_argument(
         "--k",
         type=int,
-        default=5,
-        help="RAG 检索时使用的文档个数（默认 5）。",
+        default=None,
+        help="RAG 检索时使用的文档个数（覆盖 config.yaml）。",
     )
     parser.add_argument(
         "--save",
         action="store_true",
-        help="是否将通过验证的任务代码保存到 VIMA_Gen/generated_tasks/。",
+        default=None,
+        help="将通过验证的任务代码保存到 save_dir（覆盖 config.yaml）。",
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-4.1-mini",
-        help="LangChain 调用的模型名称。",
+        default=None,
+        help="LLM 模型名称（覆盖 .env / config.yaml）。",
     )
     parser.add_argument(
         "--temperature",
         type=float,
-        default=0.7,
-        help="生成随机性（LLM temperature）。",
+        default=None,
+        help="生成随机性（覆盖 .env / config.yaml）。",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help=(
+            "运行设备：auto（默认，检测到 CUDA 就用 GPU）/ cpu / cuda / cuda:0。"
+            "也可用环境变量 VIMA_DEVICE 指定。"
+        ),
     )
 
     args = parser.parse_args()
 
+    # ---- 配置合并：CLI 参数 > .env / 环境变量 > config.yaml > 内置默认 ----
+    cfg = load_config(args.config)
+    if args.model is not None:
+        cfg.llm.model = args.model
+    if args.temperature is not None:
+        cfg.llm.temperature = args.temperature
+    if args.n is not None:
+        cfg.n = args.n
+    if args.k is not None:
+        cfg.k = args.k
+    if args.save is not None:
+        cfg.save = args.save
+    if args.brief is not None:
+        cfg.brief = args.brief
+    if args.device is not None:
+        cfg.device = args.device
+
+    print(f"[RAG] 配置：{cfg.summary()}")
+
+    # 解析并启用运行设备：auto 时若检测到 CUDA 则使用 GPU
+    from vima_bench.tasks.utils.device import configure_device
+
+    device = configure_device(cfg.device)
+    try:
+        cfg.llm.require_api_key()
+    except RuntimeError as exc:
+        print(f"[RAG] 配置错误：{exc}")
+        raise SystemExit(2) from None
+
+    failed_store_path = resolve_path(cfg.failed_store_path)
+    save_dir = resolve_path(cfg.save_dir)
+    run_results_dir = resolve_path(cfg.run_results_dir)
 
     print("[RAG] 构建任务检索器（内置 + 已生成任务）...")
-    retriever = build_retriever(k=args.k)
+    retriever = build_retriever(k=cfg.k, llm=cfg.llm, embedding=cfg.embedding)
     api_reference = get_api_reference_text()
-    past_failures_text = get_past_failures_for_prompt()
+    past_failures_text = get_past_failures_for_prompt(str(failed_store_path))
 
     results = []
-    for i in range(args.n):
+    for i in range(cfg.n):
         print(f"\n========== 候选任务 #{i + 1} ==========")
 
         attempt_record = {
@@ -103,9 +152,8 @@ def main() -> None:
         try:
             proposal = propose_new_task(
                 retriever=retriever,
-                model_name=args.model,
-                temperature=args.temperature,
-                hint_brief=args.brief,
+                llm=cfg.llm,
+                hint_brief=cfg.brief,
             )
             # proposal succeeded; but we do not record generation rates here per request
         except Exception as e:
@@ -133,8 +181,7 @@ def main() -> None:
                 retriever=retriever,
                 api_reference=api_reference,
                 past_failures_text=past_failures_text,
-                model_name=args.model,
-                temperature=args.temperature,
+                llm=cfg.llm,
             )
             # code generation succeeded; not tracked in final verification summary
         except Exception as e:
@@ -151,7 +198,13 @@ def main() -> None:
 
         ok, failed_step, error_msg = verify_task_code(code, verbose=True)
         if not ok and failed_step is not None and error_msg is not None:
-            append_failed(code, failed_step, error_msg, task_name=task_name)
+            append_failed(
+                code,
+                failed_step,
+                error_msg,
+                task_name=task_name,
+                path=str(failed_store_path),
+            )
             print("[RAG] 已将该次失败记录到 failed_generations.json。")
         attempt_record["verify_ok"] = bool(ok)
         attempt_record["failed_step"] = failed_step
@@ -181,11 +234,10 @@ def main() -> None:
                 attempt_record["verify_step3"] = False
         print(f"[RAG] 验证结果：{'通过' if ok else '失败'}")
 
-        if args.save and ok:
-            save_dir = os.path.join(os.path.dirname(__file__), "generated_tasks")
+        if cfg.save and ok:
             path = save_task_code(code, save_dir=save_dir)
             print(f"[RAG] 已保存到：{path}")
-        elif args.save and not ok:
+        elif cfg.save and not ok:
             print("[RAG] 验证未通过，未保存代码。")
         else:
             print("[RAG] 未保存（如需保存请加 --save）")
@@ -207,6 +259,7 @@ def main() -> None:
         step3_rate = step3_pass / total if total else 0.0
         summary = {
             "timestamp": datetime.datetime.now().isoformat(),
+            "device": str(device),
             "total_attempts": total,
             "verify_step1_pass_count": step1_pass,
             "verify_step2_pass_count": step2_pass,
@@ -218,7 +271,7 @@ def main() -> None:
             "passed_task_names": [r.get("task_name") for r in results if r.get("verify_ok")],
             "attempts": results,
         }
-        out_dir = os.path.join(os.path.dirname(__file__), "run_results")
+        out_dir = str(run_results_dir)
         os.makedirs(out_dir, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         out_path = os.path.join(out_dir, f"run_{ts}.json")

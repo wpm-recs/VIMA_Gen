@@ -44,17 +44,19 @@ VIMA_Gen/
 ### 1) Run the generation pipeline
 
 ```bash
-python VIMA_Gen/cli.py --brief "design a new reasoning task" --n 3 --k 5 --save
+python VIMA_Gen/cli.py --brief "design a new reasoning task" --n 3 --k 5 --save --device cuda
 ```
 
-Common arguments:
+Common arguments (each overrides `config.yaml` / `.env`):
 
+- `--config`: path to the run config file (default: `VIMA_Gen/config.yaml`)
 - `--brief`: high-level hint for Step 1
 - `--n`: number of candidate tasks
 - `--k`: number of retrieved documents
-- `--model`: model name (default: `gpt-4.1-mini`)
+- `--model`: model name (overrides `VIMA_LLM_MODEL` / config)
 - `--temperature`: sampling temperature
 - `--save`: save only code that passes verification
+- `--device`: `auto` (default; GPU when CUDA is available) / `cpu` / `cuda` / `cuda:0`
 
 ### 2) Outputs
 
@@ -75,6 +77,27 @@ Common arguments:
 
 ```bash
 pip install -r requirements.txt
-export OPENAI_API_KEY=your_key_here
+```
+
+### Configuration
+
+Run settings are split into two files — no keys or model names in code:
+
+| File | Contains | Committed? |
+|---|---|---|
+| `.env` | **secrets & endpoint**: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, model names, device | ❌ git-ignored |
+| `VIMA_Gen/config.yaml` | non-secret run settings: `n`, `k`, `brief`, `save`, output paths, `device` | ✅ committed |
+
+Create your local `.env` from the template and fill in your key:
+
+```bash
+cp .env_example .env
+# then edit .env (OPENAI_API_KEY, and OPENAI_BASE_URL if you use a gateway)
+```
+
+Precedence (highest → lowest):
+
+```text
+CLI flags  >  .env / environment variables  >  VIMA_Gen/config.yaml  >  built-in defaults
 ```
 

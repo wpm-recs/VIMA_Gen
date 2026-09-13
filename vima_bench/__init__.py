@@ -4,8 +4,25 @@ from typing import Literal
 from .env import VIMAEnvBase
 from .tasks import ALL_TASKS, ALL_PARTITIONS, PARTITION_TO_SPECS
 from .env.wrappers import PromptRenderer, GUIRecorder
+from .tasks.utils.device import (
+    configure_device,
+    resolve_device,
+    get_device,
+    to_device,
+    describe as describe_device,
+)
 
-__all__ = ["make", "ALL_TASKS", "ALL_PARTITIONS", "PARTITION_TO_SPECS"]
+__all__ = [
+    "make",
+    "ALL_TASKS",
+    "ALL_PARTITIONS",
+    "PARTITION_TO_SPECS",
+    "configure_device",
+    "resolve_device",
+    "get_device",
+    "to_device",
+    "describe_device",
+]
 
 print(f"[INFO] {len(ALL_TASKS)} tasks loaded")
 ALL_TASKS = list(ALL_TASKS.keys())

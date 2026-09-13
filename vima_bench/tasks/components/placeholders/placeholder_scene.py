@@ -9,6 +9,10 @@ import pybullet as p
 from .base import Placeholder
 from ..cameras import get_agent_cam_config, Oracle
 from ...utils import pybullet_utils, misc_utils as utils
+from ...utils.device import pybullet_renderer
+
+# GPU/EGL accelerated by default; VIMA_RENDERER=tiny forces the CPU rasteriser.
+_RENDERER = pybullet_renderer()
 
 PLANE_URDF_PATH = "plane/plane.urdf"
 UR5_WORKSPACE_URDF_PATH = "ur5/workspace.urdf"
@@ -233,7 +237,7 @@ def _render_camera(config, client_id, image_size=None):
         viewMatrix=viewm,
         projectionMatrix=projm,
         flags=p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX,
-        renderer=p.ER_BULLET_HARDWARE_OPENGL,
+        renderer=_RENDERER,
         physicsClientId=client_id,
     )
 

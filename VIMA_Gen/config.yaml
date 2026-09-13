@@ -1,0 +1,55 @@
+# ============================================================
+# VIMA_Gen 运行配置（非敏感项）
+#
+# 敏感项（API key / base_url）请放在项目根目录的 .env，模板见 .env_example。
+#
+# 优先级（高 → 低）：
+#   1. CLI 参数（--model / --temperature / --n / --k / --save / --device ...）
+#   2. 环境变量（.env 或 shell：OPENAI_API_KEY / OPENAI_BASE_URL / VIMA_LLM_MODEL ...）
+#   3. 本文件
+#   4. 代码内置默认值
+# ============================================================
+
+llm:
+  # 这两项也支持被 .env 的 VIMA_LLM_MODEL / VIMA_EMBEDDING_MODEL 覆盖
+  model: gpt-4.1-mini
+  temperature: 0.7
+  # 注意：不要把 api_key 写在这里，放 .env；
+  #       base_url 走 .env 的 OPENAI_BASE_URL。
+  # api_key: null
+  # base_url: null
+
+embedding:
+  # local  = sentence-transformers 本地模型（默认，离线，无需第二个 key）
+  # openai = OpenAI 兼容的 /embeddings 接口（需要单独提供 key/base_url）
+  #
+  # 默认用 local 的原因：不少 OpenAI 兼容网关只提供 chat 而不提供 embeddings
+  # （例如 DeepSeek 的 /embeddings 会 404）。
+  provider: local
+
+  # provider=local 时使用（HuggingFace 模型 id）。
+  # 中文 query 较多时可换成多语模型，例如
+  #   sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  local_model: sentence-transformers/all-MiniLM-L6-v2
+
+  # provider=openai 时使用
+  model: text-embedding-3-small
+  # base_url: null    # 留空=官方 https://api.openai.com/v1
+  # api_key: null     # 不要写在这里，放 .env（VIMA_EMBEDDING_API_KEY）
+
+retrieval:
+  k: 5                     # RAG 检索的文档条数
+
+generation:
+  n: 1                     # 候选任务数量
+  brief: null              # 第一步的高层次提示；null = 完全由模型根据现有任务提出
+  save: false              # 是否保存通过验证的代码
+
+paths:
+  # 以下路径若为相对路径，均相对于 VIMA_Gen/ 目录解析
+  save_dir: generated_tasks            # 通过验证的代码保存位置
+  run_results_dir: run_results         # 每轮运行摘要 JSON 的位置
+  failed_store: failed_generations.json  # 失败样本池
+
+# auto（默认，检测到 CUDA 即用 GPU）/ cpu / cuda / cuda:0
+device: auto

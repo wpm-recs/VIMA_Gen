@@ -8,6 +8,20 @@ import pybullet as p
 import torch
 from transforms3d import euler
 
+# kornia re-organised its public API in 0.8: these two helpers moved from the
+# top level into ``kornia.geometry.transform``. Support both layouts.
+try:  # kornia >= 0.8
+    from kornia.geometry.transform import (
+        get_rotation_matrix2d as _get_rotation_matrix2d,
+        warp_affine as _warp_affine,
+    )
+except ImportError:  # kornia < 0.8
+    _get_rotation_matrix2d = kornia.get_rotation_matrix2d
+    _warp_affine = kornia.warp_affine
+
+# Device the tensor based helpers run on (CUDA when available).
+from .device import get_device
+
 
 # -----------------------------------------------------------------------------
 # HEIGHTMAP UTILS
@@ -577,42 +591,59 @@ def apply_perturbation(input_image, transform_params):
 
 
 class ImageRotator:
-    """Rotate for n rotations."""
+    """Rotate for n rotations.
+
+    Runs on the GPU when one is available: all transformation tensors are
+    created on ``device`` instead of on the CPU, so the whole warp is executed
+    by a single device (no per-call host<->device copies).
+
+    Args:
+        n_rotations: number of rotations to generate.
+        device: torch device spec to run on. ``None`` (default) resolves to
+            :func:`vima_bench.tasks.utils.device.get_device`, i.e. CUDA when
+            available. Pass ``"cpu"`` to force the CPU path.
+    """
 
     # Reference: https://kornia.readthedocs.io/en/latest/tutorials/warp_affine.html?highlight=rotate
 
-    def __init__(self, n_rotations):
+    def __init__(self, n_rotations, device=None):
         self.angles = []
         for i in range(n_rotations):
             theta = i * 2 * 180 / n_rotations
             self.angles.append(theta)
+        self.device = torch.device(device) if device is not None else get_device()
 
     def __call__(self, x_list, pivot, reverse=False):
         rot_x_list = []
         for i, angle in enumerate(self.angles):
-            x = x_list[i].unsqueeze(0)
+            x = x_list[i].unsqueeze(0).to(self.device)
 
             # create transformation (rotation)
             alpha: float = angle if not reverse else (-1.0 * angle)  # in degrees
-            angle: torch.tensor = torch.ones(1) * alpha
+            angle_t: torch.Tensor = torch.full(
+                (1,), alpha, device=self.device, dtype=torch.float32
+            )
 
-            # define the rotation center
-            center: torch.tensor = torch.ones(1, 2)
+            # define the rotation center (on the compute device)
+            center: torch.Tensor = torch.zeros(
+                1, 2, device=self.device, dtype=torch.float32
+            )
             center[..., 0] = pivot[1]
             center[..., 1] = pivot[0]
 
             # define the scale factor
-            scale: torch.tensor = torch.ones(1, 2)
+            scale: torch.Tensor = torch.ones(
+                1, 2, device=self.device, dtype=torch.float32
+            )
 
             # compute the transformation matrix
-            M: torch.tensor = kornia.get_rotation_matrix2d(center, angle, scale)
+            M: torch.Tensor = _get_rotation_matrix2d(center, angle_t, scale)
 
             # apply the transformation to original image
             _, _, h, w = x.shape
-            x_warped: torch.tensor = kornia.warp_affine(
+            x_warped: torch.Tensor = _warp_affine(
                 x.float(), M.to(x.device), dsize=(h, w)
             )
-            x_warped = x_warped
             rot_x_list.append(x_warped)
 
         return rot_x_list
