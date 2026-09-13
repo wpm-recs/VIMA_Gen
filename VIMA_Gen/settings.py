@@ -170,6 +170,8 @@ class RunConfig:
     k: int = 5
     brief: Optional[str] = None
     save: bool = False
+    # 验证失败后，带着确定性报错让模型重写几次（0 = 关闭）
+    max_repair: int = 1
 
     # paths（相对路径一律相对 VIMA_Gen/ 解析，见 resolve_path）
     save_dir: str = "generated_tasks"
@@ -191,6 +193,7 @@ class RunConfig:
                 f"n={self.n}",
                 f"k={self.k}",
                 f"save={self.save}",
+                f"max_repair={self.max_repair}",
                 f"device={self.device or 'auto'}",
             ]
         )
@@ -272,6 +275,7 @@ def load_config(config_path: Optional[str | Path] = None) -> RunConfig:
         k=int(_select(cfg, "retrieval.k", 5)),
         brief=_select(cfg, "generation.brief"),
         save=bool(_select(cfg, "generation.save", False)),
+        max_repair=int(_select(cfg, "generation.max_repair", 1)),
         save_dir=str(_select(cfg, "paths.save_dir", "generated_tasks")),
         run_results_dir=str(_select(cfg, "paths.run_results_dir", "run_results")),
         failed_store_path=str(

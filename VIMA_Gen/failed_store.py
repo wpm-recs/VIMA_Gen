@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import List
 
 # 存储文件放在 VIMA_Gen 目录下
@@ -13,7 +14,25 @@ DEFAULT_PATH = os.path.join(_THIS_DIR, "failed_generations.json")
 
 # 单条代码预览最大行数；最多保留的失败条数
 CODE_SNIPPET_LINES = 35
-MAX_ENTRIES = 25
+# 按「错误指纹」聚合后条数上限可以放宽：同一种错误只占 1 条
+MAX_ENTRIES = 60
+# 注入提示词时最多展示多少种不同的错误指纹
+MAX_PROMPT_FINGERPRINTS = 12
+
+
+def fingerprint(error: str) -> str:
+    """把错误信息归一化成指纹，用于把同类失败聚合到一起。
+
+    去掉引号内的具体名字与数字，使
+    ``ResultTuple.__new__() got an unexpected keyword argument 'distance'`` 与
+    ``... argument 'extra'`` 归为同一条。
+    """
+    text = (error or "").strip().splitlines()[0] if error else ""
+    text = re.sub(r"'[^']*'", "'X'", text)
+    text = re.sub(r'"[^"]*"', "'X'", text)
+    text = re.sub(r"\b\d+\b", "N", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:160] or "unknown"
 
 
 def _load_raw(path: str) -> List[dict]:
@@ -40,13 +59,28 @@ def append_failed(
     if len(lines) > CODE_SNIPPET_LINES:
         snippet += "\n# ... (truncated)"
 
+    fp = fingerprint(error_message)
     entry = {
         "task_name": task_name or "",
         "failed_step": failed_step,
         "error": error_message.strip(),
         "code_snippet": snippet,
+        "fingerprint": fp,
+        "count": 1,
     }
     data = _load_raw(path)
+
+    # 同类错误聚合：同指纹只保留一条，累加 count 并刷新为最新样本
+    for i, existing in enumerate(data):
+        same = existing.get("fingerprint") == fp or (
+            not existing.get("fingerprint")
+            and fingerprint(existing.get("error", "")) == fp
+        )
+        if same:
+            entry["count"] = int(existing.get("count", 1)) + 1
+            data.pop(i)
+            break
+
     data.append(entry)
     if len(data) > MAX_ENTRIES:
         data = data[-MAX_ENTRIES:]
@@ -63,17 +97,28 @@ def get_past_failures_for_prompt(path: str = DEFAULT_PATH) -> str:
     if not data:
         return ""
 
+    # 按「出现次数优先、其次失败步骤」排序，只注入最典型的高频错误
+    ranked = sorted(
+        data,
+        key=lambda e: (int(e.get("count", 1)), e.get("failed_step") or 0),
+        reverse=True,
+    )[:MAX_PROMPT_FINGERPRINTS]
+
     parts = [
         "========== Past failures (avoid similar mistakes) ==========",
         "The following generated code failed verification. Do NOT repeat these errors.",
+        "They are ranked by how often they occurred. Fix the ROOT CAUSE, not the symptom.",
         "",
     ]
-    for i, entry in enumerate(data[-15:], 1):  # 最多注入最近 15 条
+    for i, entry in enumerate(ranked, 1):
         step = entry.get("failed_step", 0)
         err = entry.get("error", "")
         snippet = entry.get("code_snippet", "")
         name = entry.get("task_name", "")
-        parts.append(f"--- Failure #{i} (task_name={name}, failed at Step {step}) ---")
+        count = int(entry.get("count", 1))
+        parts.append(
+            f"--- Failure #{i} (occurred {count}x, task_name={name}, failed at Step {step}) ---"
+        )
         parts.append(f"Error: {err[:500]}" + ("..." if len(err) > 500 else ""))
         parts.append("Code snippet:")
         parts.append(snippet)

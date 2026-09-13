@@ -46,12 +46,17 @@ def _embedding_model(embedding: EmbeddingConfig | None = None):
 PROMPT_STEP1_SYSTEM = """You are an expert in the VIMA-Bench task suite.
 
 Given the list of EXISTING task names and their short descriptions below, propose ONE new task that:
-- Has a unique task_name (snake_case, not in the existing list).
+- Has a unique task_name that is NOT in the existing list AND NOT in the already-proposed list.
 - Has a clear one- or two-sentence task_description (what the agent must do).
 - Fits one of the existing groups: instruction_following, constraint_satisfaction, novel_concept_grounding, one_shot_imitation, rearrangement, require_memory, require_reasoning.
 
+CRITICAL — TASK_NAME format:
+- Must be a BARE lower_snake_case identifier, matching ^[a-z][a-z0-9_]*$
+- Must NOT contain "/" and must NOT include the group as a prefix.
+  Right: odd_one_out      Wrong: require_reasoning/odd_one_out
+
 Output format (use exactly this structure, no extra text):
-TASK_NAME: <snake_case_name>
+TASK_NAME: <bare snake_case_name>
 GROUP: <one of the groups above>
 TASK_DESCRIPTION: <one or two sentences>
 """
@@ -63,10 +68,14 @@ def propose_new_task(
     model_name: str | None = None,
     temperature: float | None = None,
     hint_brief: str | None = None,
+    seen_names: list[str] | None = None,
 ) -> Dict[str, str]:
     """
     Step 1: Propose a new task name and description from existing task list.
     Returns dict with keys: task_name, group, task_description.
+
+    Args:
+        seen_names: 名字已在本轮（或历史生成）出现过的任务，注入提示词以避免重复提议。
     """
     existing = get_existing_task_names_and_docs()
     existing_text = "\n".join(
@@ -76,6 +85,15 @@ def propose_new_task(
     user_content = f"""Existing VIMA-Bench tasks (do not duplicate these names):
 {existing_text}
 """
+    if seen_names:
+        # 只列出裸名，避免模型照抄"group/name"这种带前缀的写法
+        uniq = sorted({str(n).split("/")[-1] for n in seen_names if n})
+        user_content += (
+            "\nAlready proposed (do NOT propose any of these again, "
+            "and do NOT copy their 'group/name' style):\n"
+            + "\n".join(f"- {n}" for n in uniq)
+            + "\n"
+        )
     if hint_brief:
         user_content += f"\nUser hint for the new task: {hint_brief}\n"
     user_content += "\nPropose one new task (TASK_NAME, GROUP, TASK_DESCRIPTION):"
@@ -173,6 +191,21 @@ class TEMPLATE_Task(BaseTask):
 
 You MUST use ONLY the following imports and tools. Do NOT use any other module path (e.g. do NOT use vima_bench.utils.obj_pedia or vima_bench.utils.pybullet_utils).
 
+HARD RULES (violating any of these is an automatic failure):
+  R1. `ObjPedia.XXX` / `TexturePedia.XXX` are ENUM MEMBERS. Always append `.value`
+      to obtain the entry object (which has `.size_range` / `.color_value`).
+      `ObjPedia.BOWL.size_range` is WRONG; `ObjPedia.BOWL.value.size_range` is RIGHT.
+      Never pass an enum member where an ObjEntry/TextureEntry is expected (e.g. `color=TexturePedia.RED`).
+  R2. Never call `all_entries()`, `all_light_dark_entries()`,
+      `all_entries_no_rotational_symmetry()`, `lookup_object_by_name(...)` or
+      `lookup_color_by_name(...)` — their type hints lie: they return enum members.
+      Write the allowed names explicitly instead.
+  R3. Use ONLY object/colour names from the provided lists. Never invent names.
+  R4. `ResultTuple` accepts ONLY `success` and `failure`. Never pass extra keywords
+      such as `distance=`.
+  R5. `self.get_random_pose(...)` returns `(None, None)` when no free space exists —
+      always null-check before using the pose in arithmetic.
+
 {api_reference}
 
 You are also given example task implementations from VIMA-Bench, and the following canonical skeleton that you MUST follow closely (only fill TODO sections, do not remove required lines like self._all_goals = self.goals.copy()):
@@ -257,11 +290,13 @@ def generate_new_task_code(
     llm: LLMConfig | None = None,
     model_name: str | None = None,
     temperature: float | None = None,
+    repair_error: str | None = None,
 ) -> str:
     """
     Step 2: Generate Python code for the task given (task_name, task_description, group).
     Uses api_reference so the model only uses allowed imports and tools.
     past_failures_text: 历史未通过代码与报错，注入提示词以规避相似错误。
+    repair_error: 上一次尝试的确定性报错，注入后要求模型只针对该问题重写整份代码。
     """
     brief = f"task_name: {task_name}\ngroup: {group}\ntask_description: {task_description}"
 
@@ -285,9 +320,23 @@ Avoid the above errors in your new code.
 
 """
 
+    repair_block = ""
+    if repair_error:
+        repair_block = f"""
+!!!!!!!!!! REPAIR REQUIRED !!!!!!!!!!
+Your PREVIOUS attempt for this exact task was rejected by a deterministic check with:
+
+    {repair_error}
+
+Rewrite the FULL class from scratch and fix exactly this problem.
+Do not repeat the mistake. Re-read HARD RULES R1-R5 before answering.
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+"""
+
     user_prompt = f"""New task to implement:
 {brief}
-{failures_block}
+{failures_block}{repair_block}
 Example tasks for reference:
 {context}
 

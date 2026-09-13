@@ -82,6 +82,12 @@ def main() -> None:
         help="生成随机性（覆盖 .env / config.yaml）。",
     )
     parser.add_argument(
+        "--max-repair",
+        type=int,
+        default=None,
+        help="验证失败后带着报错重写几次（覆盖 config.yaml；0 = 关闭）。",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default=None,
@@ -107,6 +113,8 @@ def main() -> None:
         cfg.save = args.save
     if args.brief is not None:
         cfg.brief = args.brief
+    if args.max_repair is not None:
+        cfg.max_repair = args.max_repair
     if args.device is not None:
         cfg.device = args.device
 
@@ -132,6 +140,7 @@ def main() -> None:
     past_failures_text = get_past_failures_for_prompt(str(failed_store_path))
 
     results = []
+    seen_names: list[str] = []
     for i in range(cfg.n):
         print(f"\n========== 候选任务 #{i + 1} ==========")
 
@@ -154,6 +163,7 @@ def main() -> None:
                 retriever=retriever,
                 llm=cfg.llm,
                 hint_brief=cfg.brief,
+                seen_names=seen_names,
             )
             # proposal succeeded; but we do not record generation rates here per request
         except Exception as e:
@@ -168,35 +178,61 @@ def main() -> None:
         group = proposal["group"]
         task_description = proposal["task_description"]
         attempt_record["task_name"] = task_name
+        seen_names.append(task_name)
         print(f"[RAG] 提议: task_name={task_name}, group={group}")
         print(f"[RAG] 描述: {task_description}")
 
-        # Step 2: Generate code
+        # Step 2 + 验证（失败则带着确定性报错重写，最多 cfg.max_repair 次）
         print("[RAG] Step 2: 生成代码...")
-        try:
-            code = generate_new_task_code(
-                task_name=task_name,
-                task_description=task_description,
-                group=group,
-                retriever=retriever,
-                api_reference=api_reference,
-                past_failures_text=past_failures_text,
-                llm=cfg.llm,
-            )
-            # code generation succeeded; not tracked in final verification summary
-        except Exception as e:
-            print(f"[RAG] Step 2 失败：{e}")
-            attempt_record["error_msg"] = str(e)
+        code = None
+        ok = False
+        failed_step = None
+        error_msg = None
+        repairs = 0
+        initial_failed_step = None
+
+        for attempt in range(cfg.max_repair + 1):
+            try:
+                code = generate_new_task_code(
+                    task_name=task_name,
+                    task_description=task_description,
+                    group=group,
+                    retriever=retriever,
+                    api_reference=api_reference,
+                    past_failures_text=past_failures_text,
+                    llm=cfg.llm,
+                    repair_error=error_msg if attempt > 0 else None,
+                )
+            except Exception as e:
+                print(f"[RAG] Step 2 失败：{e}")
+                attempt_record["error_msg"] = str(e)
+                code = None
+                break
+
+            print(f"[RAG] 生成任务的 task_name: {extract_task_name_literal(code) or task_name}")
+            if attempt == 0:
+                print("\n----- 代码预览-----")
+                print("\n".join(code.splitlines()))
+                print("----- 预览结束 -----\n")
+
+            ok, failed_step, error_msg = verify_task_code(code, verbose=True)
+            if ok:
+                break
+            if initial_failed_step is None:
+                initial_failed_step = failed_step
+            if attempt < cfg.max_repair:
+                repairs += 1
+                print(
+                    f"[RAG] 修复重试 #{repairs}：上一次失败于 Step {failed_step}，"
+                    "带着该报错重新生成..."
+                )
+            else:
+                break
+
+        if code is None:
             results.append(attempt_record)
             continue
 
-        print(f"[RAG] 生成任务的 task_name: {extract_task_name_literal(code) or task_name}")
-        preview_lines = code.splitlines()[:]
-        print("\n----- 代码预览-----")
-        print("\n".join(preview_lines))
-        print("----- 预览结束 -----\n")
-
-        ok, failed_step, error_msg = verify_task_code(code, verbose=True)
         if not ok and failed_step is not None and error_msg is not None:
             append_failed(
                 code,
@@ -206,6 +242,8 @@ def main() -> None:
                 path=str(failed_store_path),
             )
             print("[RAG] 已将该次失败记录到 failed_generations.json。")
+        attempt_record["repairs"] = repairs
+        attempt_record["initial_failed_step"] = initial_failed_step
         attempt_record["verify_ok"] = bool(ok)
         attempt_record["failed_step"] = failed_step
         attempt_record["error_msg"] = error_msg
@@ -267,6 +305,16 @@ def main() -> None:
             "verify_step1_pass_rate": step1_rate,
             "verify_step2_pass_rate": step2_rate,
             "verify_step3_pass_rate": step3_rate,
+            # 修复重试统计
+            "max_repair": cfg.max_repair,
+            "repair_attempts": sum(int(r.get("repairs") or 0) for r in results),
+            "candidates_needing_repair": sum(1 for r in results if r.get("repairs")),
+            "first_try_pass_count": sum(
+                1 for r in results if r.get("verify_ok") and not r.get("repairs")
+            ),
+            "repair_rescued_count": sum(
+                1 for r in results if r.get("verify_ok") and r.get("repairs")
+            ),
             "all_task_names": all_task_names,
             "passed_task_names": [r.get("task_name") for r in results if r.get("verify_ok")],
             "attempts": results,

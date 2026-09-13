@@ -44,6 +44,7 @@ generation:
   n: 1                     # 候选任务数量
   brief: null              # 第一步的高层次提示；null = 完全由模型根据现有任务提出
   save: false              # 是否保存通过验证的代码
+  max_repair: 1            # 验证失败后带着确定性报错重写几次（0 = 关闭修复重试）
 
 paths:
   # 以下路径若为相对路径，均相对于 VIMA_Gen/ 目录解析

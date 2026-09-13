@@ -215,3 +215,5 @@ verifier_debug/
 .vscode/
 VIMA_Gen/run_results/
 VIMA_Gen/failed_generations.json
+doc/2310.01361v2.pdf
+doc/论文实验方案.md

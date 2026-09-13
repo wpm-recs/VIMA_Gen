@@ -50,6 +50,130 @@ def _structural_checks(code: str) -> tuple[bool, str]:
     return True, ""
 
 
+# 这些 helper 的类型标注说返回 ObjEntry/TextureEntry，实际返回枚举成员（vima_bench 行为，
+# 属通行标准故不改动源码），因此在 VIMA_Gen 侧直接禁用并给出替代写法。
+_FORBIDDEN_ENCYCLOPEDIA_HELPERS = (
+    "all_entries",
+    "all_light_dark_entries",
+    "all_entries_no_rotational_symmetry",
+    "lookup_object_by_name",
+    "lookup_color_by_name",
+)
+
+_ENCYCLOPEDIA_MEMBERS: Optional[dict] = None
+
+# 只有 entry 对象（`.value`）才拥有的字段。在枚举成员上直接访问这些字段**必然**
+# 抛 AttributeError，因此可以无风险地硬拦。
+# 注意：不能把 `name` 放进来 —— 成员和 entry 都有 `.name`。
+_ENTRY_ONLY_ATTRS = (
+    "size_range",
+    "color_value",
+    "texture_asset",
+    "assets",
+    "from_template",
+    "replace_fn",
+    "pose_transform_fn",
+    "template_file",
+    "profile",
+    "symmetry",
+    "novel_name",
+    "alias",
+)
+_ENTRY_ATTR_ALT = "|".join(_ENTRY_ONLY_ATTRS)
+
+
+def _encyclopedia_members() -> dict:
+    """惰性加载 {"ObjPedia": {...}, "TexturePedia": {...}}（真实枚举成员名）。"""
+    global _ENCYCLOPEDIA_MEMBERS
+    if _ENCYCLOPEDIA_MEMBERS is None:
+        from vima_bench.tasks.components.encyclopedia import ObjPedia, TexturePedia
+
+        _ENCYCLOPEDIA_MEMBERS = {
+            "ObjPedia": {m.name for m in ObjPedia},
+            "TexturePedia": {m.name for m in TexturePedia},
+        }
+    return _ENCYCLOPEDIA_MEMBERS
+
+
+def check_task_name_format(code: str) -> list:
+    """task_name 必须是裸的 lower_snake_case（不能带 group 前缀 / 斜杠）。"""
+    name = extract_task_name_literal(code)
+    if name is None:
+        return ['task_name = "..." not found; the class must define `task_name` as a string.']
+    if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
+        return [
+            f"task_name={name!r} is invalid: use a bare lower-snake_case name "
+            '(e.g. "odd_one_out"), without "/" and without a group prefix.'
+        ]
+    return []
+
+
+def static_semantic_checks(code: str) -> tuple[list, list]:
+    """确定性语义检查，把**必然**导致运行期崩溃的写法提前拦下。
+
+    返回 ``(errors, warnings)``：
+
+    * ``errors`` 会直接判 Step 1 失败 —— 只放**零误报**的规则；
+    * ``warnings`` 只打印不拦截 —— 例如调用 ``all_entries()``：它确实返回枚举成员，
+      但很多**能正常运行**的代码会先调用再自行做 ``hasattr(t, 'value')`` 归一化，
+      一起硬拦会把正确代码误杀，反而拉低通过率。
+
+    规则只依赖真实枚举成员集合与纯文本模式，不执行生成代码。
+    """
+    errors: list = []
+    warnings: list = []
+    members = _encyclopedia_members()
+
+    # R2（警告，不拦截）：调用了“标注与实现不符”的 helper
+    for helper in _FORBIDDEN_ENCYCLOPEDIA_HELPERS:
+        if re.search(rf"\b(?:ObjPedia|TexturePedia)\.{helper}\s*\(", code):
+            warnings.append(
+                f"{helper}() returns enum MEMBERS (despite its type hint); "
+                "make sure to normalise with `.value`"
+            )
+
+    # R3（拦截）：引用的成员必须真实存在
+    for cls, name in re.findall(r"\b(ObjPedia|TexturePedia)\.([A-Z][A-Z0-9_]*)", code):
+        if name not in members.get(cls, set()):
+            errors.append(
+                f"{cls}.{name} does not exist; use ONLY the names from the allowed list"
+            )
+
+    # R1a（拦截）：直接在枚举成员上访问 entry 专有字段 → 必然 AttributeError。
+    # 例：ObjPedia.BOWL.size_range（正确写法是 ObjPedia.BOWL.value.size_range）
+    for match in re.finditer(
+        rf"\b(ObjPedia|TexturePedia)\.([A-Z][A-Z0-9_]*)\s*\.\s*({_ENTRY_ATTR_ALT})\b",
+        code,
+    ):
+        cls, name, attr = match.group(1), match.group(2), match.group(3)
+        if name in members.get(cls, set()):
+            errors.append(
+                f"{cls}.{name} is an enum MEMBER and has no `.{attr}`; "
+                f"write {cls}.{name}.value.{attr}"
+            )
+
+    # R1b（拦截）：把枚举成员当作 entry 传给需要 entry 的参数。
+    # 例：color=TexturePedia.RED（库内 p_change_texture 会访问 .color_value 而崩）
+    for match in re.finditer(
+        r"\bcolor\s*=\s*(ObjPedia|TexturePedia)\.([A-Z][A-Z0-9_]*)(?!\s*\.)", code
+    ):
+        cls, name = match.group(1), match.group(2)
+        errors.append(
+            f"color={cls}.{name} passes an enum MEMBER; write {cls}.{name}.value instead"
+        )
+
+    # R4（拦截）：ResultTuple 只接受 success / failure
+    for args in re.findall(r"ResultTuple\s*\(([^)]*)\)", code):
+        for kw in re.findall(r"(\w+)\s*=", args):
+            if kw not in ("success", "failure"):
+                errors.append(
+                    f"ResultTuple only accepts 'success' and 'failure'; got '{kw}'"
+                )
+
+    # 去重并保持顺序
+    return list(dict.fromkeys(errors)), list(dict.fromkeys(warnings))
+
+
 def load_task_class_from_code(code: str) -> Type[BaseTask]:
     """
     在“模拟 tasks 文件夹”的环境中 exec 代码并返回任务类。
@@ -84,6 +208,24 @@ def verify_task_code(code: str, verbose: bool = True) -> tuple[bool, Optional[in
         if verbose:
             print(f"[VERIFY][Step 1] 结构检查失败：{struct_msg}")
         return False, 1, struct_msg
+
+    # Step 1b: 确定性语义检查（早于 exec，避免付出建环境 + 仿真的代价）
+    try:
+        semantic_errors, semantic_warnings = static_semantic_checks(code)
+        semantic_errors += check_task_name_format(code)
+    except Exception as e:  # 检查器自身异常不应阻断验证
+        semantic_errors, semantic_warnings = [], []
+        if verbose:
+            print(f"[VERIFY][Step 1] 语义检查器异常（已跳过）：{e}")
+    if verbose:
+        for w in semantic_warnings:
+            print(f"[VERIFY][Step 1] 警告：{w}")
+    if semantic_errors:
+        err_msg = "; ".join(semantic_errors)
+        if verbose:
+            print(f"[VERIFY][Step 1] 语义检查失败：{err_msg}")
+        return False, 1, err_msg
+
     try:
         TaskCls = load_task_class_from_code(code)
         if verbose:
